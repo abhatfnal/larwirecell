@@ -14,6 +14,10 @@ physics: {
       expected_event: 1
       worker_path: "/lus/eagle/projects/neutrinoGPU/abhat/sbnd/sample_generation_port/work/larwirecell-streaming-recoframe-install/bin/reco_frame_process_b_worker"
       custom_wct_root: "/lus/eagle/projects/neutrinoGPU/abhat/sbnd/sample_generation_port/reference/extracted/local_wct/wire-cell-toolkit"
+      process_c_python: "/lus/eagle/projects/neutrinoGPU/abhat/conda/envs/nugraph-a-sophia/bin/python"
+      process_c_launcher: "/lus/eagle/projects/neutrinoGPU/abhat/sbnd/sample_generation_port/work/larwirecell-streaming-recoframe-install/bin/process_c_python311_launcher.sh"
+      process_c_host_lib64: "/sophia-host-lib64"
+      process_c_nugraph_root: "/lus/eagle/projects/neutrinoGPU/abhat/sbnd/clustering/nugraph"
     }
   }
   processBPath: [recoframeProcessB]

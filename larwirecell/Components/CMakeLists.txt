@@ -79,6 +79,8 @@ cet_make_exec(NAME reco_frame_process_b_worker
   WireCell::Aux
   WireCell::Clus
 )
+
+install(PROGRAMS process_c_python311_launcher.sh DESTINATION bin)
 target_include_directories(reco_frame_process_b_worker PRIVATE "${_wirecell_miniz_include}")
 
 add_subdirectory(test)

@@ -123,13 +123,21 @@ namespace {
   };
 
   ExecEnvironment custom_worker_environment(std::string const& worker_path,
-                                             std::string const& custom_wct_root)
+                                             std::string const& custom_wct_root,
+                                             std::string const& process_c_python,
+                                             std::string const& process_c_launcher,
+                                             std::string const& process_c_host_lib64,
+                                             std::string const& process_c_nugraph_root)
   {
     ExecEnvironment result;
     for (char** entry = environ; entry && *entry; ++entry) {
       std::string const value{*entry};
       if (value.rfind("LD_LIBRARY_PATH=", 0U) == 0U ||
           value.rfind("WIRECELL_PATH=", 0U) == 0U ||
+          value.rfind("PROCESS_C_PYTHON=", 0U) == 0U ||
+          value.rfind("PROCESS_C_LAUNCHER=", 0U) == 0U ||
+          value.rfind("PROCESS_C_HOST_LIB64=", 0U) == 0U ||
+          value.rfind("PROCESS_C_NUGRAPH_ROOT=", 0U) == 0U ||
           value.rfind("RECOFRAME_RUNTIME_ROLE=", 0U) == 0U) {
         continue;
       }
@@ -148,6 +156,13 @@ namespace {
     result.storage.push_back("WIRECELL_PATH=" + custom_wct_root + "/cfg:" +
                              custom_wct_root + "/wire-cell-data");
     result.storage.push_back("RECOFRAME_RUNTIME_ROLE=custom-wct-worker");
+    if (!process_c_python.empty() && !process_c_launcher.empty() &&
+        !process_c_host_lib64.empty() && !process_c_nugraph_root.empty()) {
+      result.storage.push_back("PROCESS_C_PYTHON=" + process_c_python);
+      result.storage.push_back("PROCESS_C_LAUNCHER=" + process_c_launcher);
+      result.storage.push_back("PROCESS_C_HOST_LIB64=" + process_c_host_lib64);
+      result.storage.push_back("PROCESS_C_NUGRAPH_ROOT=" + process_c_nugraph_root);
+    }
     result.pointers.reserve(result.storage.size() + 1U);
     for (auto& value : result.storage) {
       result.pointers.push_back(value.data());
@@ -259,6 +274,10 @@ namespace wcls {
       , expected_event_{parameters.get<std::uint32_t>("expected_event")}
       , worker_path_{parameters.get<std::string>("worker_path")}
       , custom_wct_root_{parameters.get<std::string>("custom_wct_root")}
+      , process_c_python_{parameters.get<std::string>("process_c_python", "")}
+      , process_c_launcher_{parameters.get<std::string>("process_c_launcher", "")}
+      , process_c_host_lib64_{parameters.get<std::string>("process_c_host_lib64", "")}
+      , process_c_nugraph_root_{parameters.get<std::string>("process_c_nugraph_root", "")}
     {
       reference_source_.configure(historical_configuration());
     }
@@ -297,7 +316,12 @@ namespace wcls {
         fail(std::string{"failed to set socket timeout: "} + std::strerror(errno));
       }
 
-      auto environment = custom_worker_environment(worker_path_, custom_wct_root_);
+      auto environment = custom_worker_environment(worker_path_,
+                                                   custom_wct_root_,
+                                                   process_c_python_,
+                                                   process_c_launcher_,
+                                                   process_c_host_lib64_,
+                                                   process_c_nugraph_root_);
       auto const child = spawn_worker(sockets[0], sockets[1], worker_path_, environment);
       ::close(sockets[1]);
       sockets[1] = -1;
@@ -415,6 +439,10 @@ namespace wcls {
     std::uint32_t expected_event_;
     std::string worker_path_;
     std::string custom_wct_root_;
+    std::string process_c_python_;
+    std::string process_c_launcher_;
+    std::string process_c_host_lib64_;
+    std::string process_c_nugraph_root_;
     CookedFrameSource reference_source_;
   };
 

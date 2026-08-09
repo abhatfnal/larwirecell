@@ -5,17 +5,47 @@
 
 #include "WireCellApps/Main.h"
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
+#include <chrono>
+#include <csignal>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
+#include <fcntl.h>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
+extern char** environ;
+
 namespace {
+
+  using Clock = std::chrono::steady_clock;
+
+  std::string milliseconds(std::uint64_t const nanoseconds)
+  {
+    std::ostringstream output;
+    output << static_cast<double>(nanoseconds) / 1000000.0;
+    return output.str();
+  }
+
+  std::uint64_t elapsed(Clock::time_point const begin, Clock::time_point const end)
+  {
+    return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin).count());
+  }
 
   int parse_fd(int const argc, char const* const* const argv)
   {
@@ -62,6 +92,120 @@ namespace {
       begin = end + 1U;
     }
     return result;
+  }
+
+  std::string required_environment(char const* const name)
+  {
+    auto const* value = std::getenv(name);
+    if (!value || !*value) {
+      throw std::runtime_error(std::string{"missing Process-C environment: "} + name);
+    }
+    return value;
+  }
+
+  struct ExecEnvironment {
+    std::vector<std::string> storage;
+    std::vector<char*> pointers;
+  };
+
+  ExecEnvironment process_c_environment(std::string const& nugraph_root,
+                                        std::string const& host_lib64)
+  {
+    ExecEnvironment result;
+    for (char** entry = environ; entry && *entry; ++entry) {
+      std::string const value{*entry};
+      if (value.rfind("LD_LIBRARY_PATH=", 0U) == 0U ||
+          value.rfind("WIRECELL_PATH=", 0U) == 0U ||
+          value.rfind("CET_PLUGIN_PATH=", 0U) == 0U ||
+          value.rfind("FHICL_FILE_PATH=", 0U) == 0U ||
+          value.rfind("PYTHONHOME=", 0U) == 0U ||
+          value.rfind("PYTHONUSERBASE=", 0U) == 0U ||
+          value.rfind("PYTHONNOUSERSITE=", 0U) == 0U ||
+          value.rfind("PYTHONPATH=", 0U) == 0U ||
+          value.rfind("PROCESS_C_PYTHON=", 0U) == 0U ||
+          value.rfind("PROCESS_C_LAUNCHER=", 0U) == 0U ||
+          value.rfind("PROCESS_C_HOST_LIB64=", 0U) == 0U ||
+          value.rfind("PROCESS_C_NUGRAPH_ROOT=", 0U) == 0U ||
+          value.rfind("RECOFRAME_RUNTIME_ROLE=", 0U) == 0U ||
+          value.rfind("PROCESS_C_RUNTIME_ROLE=", 0U) == 0U) {
+        continue;
+      }
+      result.storage.push_back(value);
+    }
+    result.storage.push_back("PYTHONPATH=" + nugraph_root);
+    result.storage.push_back("PYTHONNOUSERSITE=1");
+    result.storage.push_back("PROCESS_C_HOST_LIB64=" + host_lib64);
+    result.storage.push_back("PROCESS_C_RUNTIME_ROLE=python311-nugraph");
+    result.pointers.reserve(result.storage.size() + 1U);
+    for (auto& value : result.storage) {
+      result.pointers.push_back(value.data());
+    }
+    result.pointers.push_back(nullptr);
+    return result;
+  }
+
+  void mark_unrelated_fds_close_on_exec(int const preserved_fd)
+  {
+#if defined(SYS_close_range)
+    constexpr unsigned int close_range_cloexec = 1U << 2U;
+    if (::syscall(SYS_close_range, 3U, std::numeric_limits<unsigned int>::max(),
+                  close_range_cloexec) == 0) {
+      auto const flags = ::fcntl(preserved_fd, F_GETFD);
+      if (flags >= 0) {
+        ::fcntl(preserved_fd, F_SETFD, flags & ~FD_CLOEXEC);
+      }
+      return;
+    }
+#endif
+    rlimit limit{};
+    if (::getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+      ::_exit(126);
+    }
+    auto const upper = static_cast<int>(std::min<rlim_t>(limit.rlim_cur,
+                                                         std::numeric_limits<int>::max()));
+    for (int fd = 3; fd < upper; ++fd) {
+      if (fd == preserved_fd) {
+        continue;
+      }
+      auto const flags = ::fcntl(fd, F_GETFD);
+      if (flags >= 0) {
+        ::fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+      }
+    }
+    auto const flags = ::fcntl(preserved_fd, F_GETFD);
+    if (flags < 0 || ::fcntl(preserved_fd, F_SETFD, flags & ~FD_CLOEXEC) != 0) {
+      ::_exit(126);
+    }
+  }
+
+  pid_t spawn_process_c(int const parent_fd,
+                        int const child_fd,
+                        std::string const& python,
+                        std::string const& launcher,
+                        std::string const& script,
+                        std::string const& nugraph_root,
+                        ExecEnvironment& environment)
+  {
+    auto const fd_string = std::to_string(child_fd);
+    std::vector<std::string> argument_storage{
+      launcher, python, script, "--ipc-fd", fd_string, "--nugraph-root", nugraph_root};
+    std::vector<char*> arguments;
+    for (auto& argument : argument_storage) {
+      arguments.push_back(argument.data());
+    }
+    arguments.push_back(nullptr);
+
+    auto const pid = ::fork();
+    if (pid < 0) {
+      throw std::runtime_error(std::string{"Process-C fork failed: "} + std::strerror(errno));
+    }
+    if (pid == 0) {
+      ::close(parent_fd);
+      mark_unrelated_fds_close_on_exec(child_fd);
+      ::execve(launcher.c_str(), arguments.data(), environment.pointers.data());
+      ::_exit(127);
+    }
+    return pid;
   }
 
   std::string custom_wct_root()
@@ -126,6 +270,182 @@ namespace {
     if (clus_count != 1U) {
       throw std::runtime_error("Process B did not load exactly one libWireCellClus.so");
     }
+  }
+
+  void require_identity(wcls::ipc::Message const& message,
+                        wcls::EventRecoIdentity const& expected,
+                        char const* const context)
+  {
+    auto const& actual = message.envelope.identity;
+    if (actual.run != expected.run || actual.subrun != expected.subrun ||
+        actual.event != expected.event) {
+      throw std::runtime_error(std::string{context} + " event identity differs");
+    }
+  }
+
+  void throw_process_c_error(wcls::ipc::Message const& message)
+  {
+    if (message.envelope.message_type == wcls::ipc::MessageType::Error) {
+      throw std::runtime_error("Process C rejected RecoArrays: " +
+                               wcls::ipc::decode_error_message(message));
+    }
+  }
+
+  void require_same_reco_arrays(wcls::RecoArrays const& source,
+                                wcls::RecoArrays const& returned,
+                                int const apa)
+  {
+    if (source.arrays.size() != returned.arrays.size()) {
+      throw std::runtime_error("Process-C APA" + std::to_string(apa) +
+                               " array count differs");
+    }
+    for (std::size_t array_index = 0U; array_index < source.arrays.size(); ++array_index) {
+      auto const& expected = source.arrays[array_index];
+      auto const& actual = returned.arrays[array_index];
+      if (expected.name != actual.name || expected.rows != actual.rows ||
+          expected.columns != actual.columns || expected.values.size() != actual.values.size()) {
+        throw std::runtime_error("Process-C APA" + std::to_string(apa) +
+                                 " metadata differs for " + expected.name);
+      }
+      auto const byte_count = expected.values.size() * sizeof(float);
+      if (byte_count == 0U ||
+          std::memcmp(expected.values.data(), actual.values.data(), byte_count) == 0) {
+        continue;
+      }
+      auto const* expected_bytes =
+        reinterpret_cast<unsigned char const*>(expected.values.data());
+      auto const* actual_bytes = reinterpret_cast<unsigned char const*>(actual.values.data());
+      auto const mismatch =
+        std::mismatch(expected_bytes, expected_bytes + byte_count, actual_bytes);
+      auto const byte_index = static_cast<std::size_t>(mismatch.first - expected_bytes);
+      auto const element_index = byte_index / sizeof(float);
+      std::uint32_t expected_bits = 0U;
+      std::uint32_t actual_bits = 0U;
+      std::memcpy(&expected_bits, expected.values.data() + element_index, sizeof expected_bits);
+      std::memcpy(&actual_bits, actual.values.data() + element_index, sizeof actual_bits);
+      throw std::runtime_error("Process-C APA" + std::to_string(apa) + " raw bytes differ for " +
+                               expected.name + " at byte " + std::to_string(byte_index) +
+                               " element " + std::to_string(element_index) + " C++ bits " +
+                               std::to_string(expected_bits) + " Python bits " +
+                               std::to_string(actual_bits));
+    }
+  }
+
+  void run_process_c(wcls::ProcessBResult const& result)
+  {
+    auto const python = required_environment("PROCESS_C_PYTHON");
+    auto const launcher = required_environment("PROCESS_C_LAUNCHER");
+    auto const host_lib64 = required_environment("PROCESS_C_HOST_LIB64");
+    auto const nugraph_root = required_environment("PROCESS_C_NUGRAPH_ROOT");
+    auto const script = nugraph_root + "/scripts/process_c_recoarrays_receiver.py";
+    if (!std::filesystem::is_regular_file(python) ||
+        !std::filesystem::is_regular_file(launcher) ||
+        !std::filesystem::is_regular_file(host_lib64 + "/ld-linux-x86-64.so.2") ||
+        !std::filesystem::is_regular_file(script)) {
+      throw std::runtime_error("Process-C Python, launcher, host loader, or receiver is missing");
+    }
+
+    std::array<std::vector<std::uint8_t>, 2U> encoded;
+    auto const encode_begin = Clock::now();
+    for (std::size_t apa = 0U; apa < encoded.size(); ++apa) {
+      auto const& arrays = result.apa[apa].reco_arrays;
+      encoded[apa] = wcls::ipc::encode_reco_arrays(result.identity,
+                                                   static_cast<int>(apa),
+                                                   arrays);
+      for (auto const& array : arrays.arrays) {
+        std::cout << "PROCESS_B_RECOARRAY_FINGERPRINT apa=" << apa
+                  << " name=" << array.name
+                  << " value=" << wcls::ipc::fingerprint_reco_array(array) << '\n';
+      }
+    }
+    auto const encode_ns = elapsed(encode_begin, Clock::now());
+
+    int sockets[2] = {-1, -1};
+    if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) != 0) {
+      throw std::runtime_error(std::string{"Process-C socketpair failed: "} +
+                               std::strerror(errno));
+    }
+    timeval timeout{120, 0};
+    if (::setsockopt(sockets[0], SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout) != 0 ||
+        ::setsockopt(sockets[0], SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout) != 0) {
+      ::close(sockets[0]);
+      ::close(sockets[1]);
+      throw std::runtime_error("failed to set Process-C socket timeout");
+    }
+
+    auto environment = process_c_environment(nugraph_root, host_lib64);
+    auto const child = spawn_process_c(
+      sockets[0], sockets[1], python, launcher, script, nugraph_root, environment);
+    ::close(sockets[1]);
+    sockets[1] = -1;
+    auto const round_trip_begin = Clock::now();
+    std::uint64_t socket_write_ns = 0U;
+    try {
+      auto const write_begin = Clock::now();
+      for (auto const& message : encoded) {
+        wcls::ipc::write_all(sockets[0], message);
+      }
+      wcls::ipc::MessageEnvelope end;
+      end.message_type = wcls::ipc::MessageType::EndOfStream;
+      end.identity = result.identity;
+      wcls::ipc::write_all(sockets[0], wcls::ipc::encode_message(end, {}));
+      socket_write_ns = elapsed(write_begin, Clock::now());
+
+      for (std::size_t apa = 0U; apa < encoded.size(); ++apa) {
+        auto const response = wcls::ipc::read_message(
+          sockets[0], wcls::ipc::RecoArraysDecodeLimits{}.max_message_payload_bytes);
+        throw_process_c_error(response);
+        require_identity(response, result.identity, "Process-C RecoArrays response");
+        auto const canonical = wcls::ipc::encode_message(response.envelope, response.payload);
+        if (canonical != encoded[apa]) {
+          auto const common = std::min(canonical.size(), encoded[apa].size());
+          auto const mismatch = std::mismatch(encoded[apa].begin(),
+                                              encoded[apa].begin() + common,
+                                              canonical.begin());
+          auto const offset = static_cast<std::size_t>(mismatch.first - encoded[apa].begin());
+          throw std::runtime_error("Process-C APA" + std::to_string(apa) +
+                                   " canonical message differs at byte " +
+                                   std::to_string(offset));
+        }
+        auto const returned = wcls::ipc::decode_reco_arrays(response, static_cast<int>(apa));
+        require_same_reco_arrays(result.apa[apa].reco_arrays, returned, static_cast<int>(apa));
+        std::cout << "PROCESS_B_TO_C_RECOARRAYS apa=" << apa
+                  << " same_run_cpp_python=true raw_bytes=true canonical_round_trip=true"
+                  << " wire_bytes=" << encoded[apa].size() << '\n';
+      }
+
+      auto const ack = wcls::ipc::read_message(sockets[0], 4096U);
+      throw_process_c_error(ack);
+      require_identity(ack, result.identity, "Process-C acknowledgement");
+      if (ack.envelope.message_type != wcls::ipc::MessageType::Ack || !ack.payload.empty()) {
+        throw std::runtime_error("Process C returned an invalid acknowledgement");
+      }
+      ::close(sockets[0]);
+      sockets[0] = -1;
+    }
+    catch (...) {
+      if (sockets[0] >= 0) {
+        ::close(sockets[0]);
+      }
+      ::kill(child, SIGTERM);
+      int ignored_status = 0;
+      ::waitpid(child, &ignored_status, 0);
+      throw;
+    }
+
+    int status = 0;
+    if (::waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+      throw std::runtime_error("exec'd Process C did not exit cleanly");
+    }
+    auto const round_trip_ns = elapsed(round_trip_begin, Clock::now());
+    std::cout << "PROCESS_B_TO_C_TRANSACTION PASS event=" << result.identity.run << "/"
+              << result.identity.subrun << "/" << result.identity.event
+              << " apa0=true apa1=true"
+              << " apa0_wire_bytes=" << encoded[0].size()
+              << " apa1_wire_bytes=" << encoded[1].size()
+              << " cpp_encode_ms=" << milliseconds(encode_ns)
+              << " socket_write_ms=" << milliseconds(socket_write_ns)
+              << " round_trip_ms=" << milliseconds(round_trip_ns) << '\n';
   }
 
   void report_arrays(wcls::ProcessBResult const& result, bool const compared)
@@ -193,6 +513,7 @@ int main(int const argc, char const* const* const argv)
     run_process_b_graph(config_path);
     auto const result = wcls::take_process_b_result();
     report_arrays(result, !legacy_directory.empty());
+    run_process_c(result);
 
     auto const libraries = wcls::ipc::test::loaded_wirecell_libraries();
     require_exact_clustering_runtime(libraries, custom_wct_root());

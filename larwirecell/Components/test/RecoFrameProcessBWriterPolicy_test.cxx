@@ -40,15 +40,17 @@ namespace {
 int main(int const argc, char const* const* const argv)
 {
   try {
-    if (argc != 6) {
+    if (argc != 7) {
       throw std::runtime_error(
-        "expected graph, worker, memory-clustering, proxy-component, and CMake paths");
+        "expected graph, worker, memory-clustering, proxy-component, CMake, and "
+        "Process-C launcher paths");
     }
     auto const graph = read(argv[1]);
     auto const worker = read(argv[2]);
     auto const memory_clustering = read(argv[3]);
     auto const proxy_components = read(argv[4]);
     auto const cmake = read(argv[5]);
+    auto const process_c_launcher = read(argv[6]);
 
     require_contains(graph,
                      "wclsMemoryMultiAlgBlobClustering",
@@ -63,6 +65,21 @@ int main(int const argc, char const* const* const argv)
       require_absent(graph, forbidden, "event-writer graph configuration");
       require_absent(worker, forbidden, "event-writer worker adapter");
     }
+    require_contains(worker,
+                     "value.rfind(\"PYTHONHOME=\", 0U)",
+                     "Process-C Python-home isolation");
+    require_contains(worker,
+                     "PYTHONNOUSERSITE=1",
+                     "Process-C user-site isolation");
+    require_contains(worker,
+                     "PROCESS_C_LAUNCHER",
+                     "Process-C cross-runtime launcher selection");
+    require_contains(process_c_launcher,
+                     "ld-linux-x86-64.so.2",
+                     "Process-C modern-glibc loader");
+    require_contains(process_c_launcher,
+                     "exec \"${host_loader}\"",
+                     "immediate Process-C Python exec");
     require_contains(graph, "\"WireCellLarsoft\"", "interface-only proxy plugin");
     for (auto const& factory : {"make_wclsRecoFrameProcessBSource_factory()",
                                 "make_wclsRecoArraysProcessBSink_factory()",
@@ -86,6 +103,9 @@ int main(int const argc, char const* const* const argv)
     require_absent(cmake,
                    "  RecoArrays.cxx\n",
                    "RecoArrays helper in WireCellLarsoft plugin sources");
+    require_contains(cmake,
+                     "process_c_python311_launcher.sh",
+                     "installed Process-C launcher");
 
     for (auto const& forbidden : {"WireCellAux/", "WireCellClus/", "WireCellUtil/Bee.h"}) {
       require_absent(proxy_components, forbidden, "proxy plugin implementation dependency");

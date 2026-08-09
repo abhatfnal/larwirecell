@@ -1,6 +1,7 @@
 #ifndef LARWIRECELL_COMPONENTS_RECOFRAMEPROTOCOL_H
 #define LARWIRECELL_COMPONENTS_RECOFRAMEPROTOCOL_H
 
+#include "RecoArrays.h"
 #include "RecoFramePayload.h"
 
 #include <cstddef>
@@ -13,12 +14,13 @@ namespace wcls::ipc {
 
   inline constexpr std::uint16_t kProtocolVersion = 1U;
   inline constexpr std::size_t kEnvelopeBytes = 32U;
+  inline constexpr std::uint32_t kRecoArraysSchemaVersion = 1U;
 
   enum class MessageType : std::uint16_t {
     RecoFramePayload = 1U,
     TruthArrays = 2U,      // reserved; no codec in this milestone
-    RecoArraysApa0 = 3U,  // reserved; no codec in this milestone
-    RecoArraysApa1 = 4U,  // reserved; no codec in this milestone
+    RecoArraysApa0 = 3U,
+    RecoArraysApa1 = 4U,
     Ack = 5U,
     Error = 6U,
     EndOfStream = 7U,
@@ -51,6 +53,17 @@ namespace wcls::ipc {
     std::uint32_t max_mask_ranges = 1000000U;
   };
 
+  struct RecoArraysDecodeLimits {
+    std::uint64_t max_message_payload_bytes = 256U * 1024U * 1024U;
+    std::uint32_t max_arrays = 6U;
+    std::uint32_t max_name_bytes = 64U;
+    std::uint32_t max_rank = 2U;
+    std::uint64_t max_dimension = 50000000U;
+    std::uint64_t max_array_elements = 50000000U;
+    std::uint64_t max_total_elements = 60000000U;
+    std::uint64_t max_array_bytes = 200U * 1024U * 1024U;
+  };
+
   class ProtocolError : public std::runtime_error {
   public:
     using std::runtime_error::runtime_error;
@@ -68,6 +81,25 @@ namespace wcls::ipc {
                                               DecodeLimits const& limits = {});
   RecoFramePayload decode_reco_frame_payload(std::vector<std::uint8_t> const& bytes,
                                               DecodeLimits const& limits = {});
+
+  // RecoArrays payload schema v1:
+  //   u32 schema, u16 APA, u16 reserved, u32 array count
+  // followed by ordered arrays, each encoded as:
+  //   string name, u32 rank, rank*u64 shape, u16 dtype, u16 reserved,
+  //   u64 raw byte count, explicit little-endian IEEE-754 data.
+  // Dtype code 1 is little-endian float32.  Current scientific arrays must be
+  // exactly rank two and follow the six-array APA-specific reconstruction order.
+  void validate_reco_arrays(RecoArrays const& arrays, int apa);
+  std::vector<std::uint8_t> encode_reco_arrays(EventRecoIdentity identity,
+                                               int apa,
+                                               RecoArrays const& arrays);
+  RecoArrays decode_reco_arrays(Message const& message,
+                                int expected_apa,
+                                RecoArraysDecodeLimits const& limits = {});
+  RecoArrays decode_reco_arrays(std::vector<std::uint8_t> const& bytes,
+                                int expected_apa,
+                                RecoArraysDecodeLimits const& limits = {});
+  std::string fingerprint_reco_array(RecoArray const& array);
 
   // Socket-fd helpers retry partial operations and EINTR.  EOF or peer closure
   // before the requested byte count is an explicit ProtocolError.

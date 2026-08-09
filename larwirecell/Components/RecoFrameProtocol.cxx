@@ -3,6 +3,7 @@
 #include <array>
 #include <cerrno>
 #include <cstring>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <sys/socket.h>
@@ -311,6 +312,99 @@ namespace {
     return result;
   }
 
+  constexpr std::uint16_t reco_float32_le = 1U;
+
+  int validate_apa(int const apa)
+  {
+    if (apa != 0 && apa != 1) {
+      throw wcls::ipc::ProtocolError("RecoArrays APA must be zero or one");
+    }
+    return apa;
+  }
+
+  wcls::ipc::MessageType reco_message_type(int const apa)
+  {
+    return validate_apa(apa) == 0 ? wcls::ipc::MessageType::RecoArraysApa0 :
+                                    wcls::ipc::MessageType::RecoArraysApa1;
+  }
+
+  std::array<std::string, 6U> reco_array_names(int const apa)
+  {
+    auto const family = std::string{"ctpc_f"} + std::to_string(validate_apa(apa));
+    return {family + "p0", family + "p1", family + "p2", "blobs", "points", "ppedges"};
+  }
+
+  std::uint64_t checked_elements(std::uint64_t const rows,
+                                 std::uint64_t const columns,
+                                 std::uint64_t const limit)
+  {
+    if (columns != 0U && rows > std::numeric_limits<std::uint64_t>::max() / columns) {
+      throw wcls::ipc::ProtocolError("RecoArrays dimensions overflow");
+    }
+    auto const elements = rows * columns;
+    if (elements > limit) {
+      throw wcls::ipc::ProtocolError("RecoArrays element count exceeds decoder limit");
+    }
+    return elements;
+  }
+
+  class Fingerprint {
+  public:
+    void u8(std::uint8_t const value)
+    {
+      value_ ^= value;
+      value_ *= 1099511628211ULL;
+    }
+
+    void u16(std::uint16_t const value)
+    {
+      u8(static_cast<std::uint8_t>(value));
+      u8(static_cast<std::uint8_t>(value >> 8U));
+    }
+
+    void u32(std::uint32_t const value)
+    {
+      for (unsigned int shift = 0U; shift < 32U; shift += 8U) {
+        u8(static_cast<std::uint8_t>(value >> shift));
+      }
+    }
+
+    void u64(std::uint64_t const value)
+    {
+      for (unsigned int shift = 0U; shift < 64U; shift += 8U) {
+        u8(static_cast<std::uint8_t>(value >> shift));
+      }
+    }
+
+    void string(std::string const& value)
+    {
+      if (value.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw wcls::ipc::ProtocolError("RecoArray fingerprint name is too long");
+      }
+      u32(static_cast<std::uint32_t>(value.size()));
+      for (auto const byte : value) {
+        u8(static_cast<std::uint8_t>(byte));
+      }
+    }
+
+    void f32(float const value)
+    {
+      std::uint32_t raw = 0U;
+      std::memcpy(&raw, &value, sizeof raw);
+      u32(raw);
+    }
+
+    std::string str() const
+    {
+      std::ostringstream output;
+      output << "fnv1a64:" << std::hex << std::setfill('0') << std::setw(16) << value_;
+      return output.str();
+    }
+
+  private:
+    std::uint64_t value_ = 14695981039346656037ULL;
+  };
+
 } // namespace
 
 std::vector<std::uint8_t> wcls::ipc::encode_message(MessageEnvelope envelope,
@@ -527,6 +621,177 @@ wcls::RecoFramePayload wcls::ipc::decode_reco_frame_payload(
   DecodeLimits const& limits)
 {
   return decode_reco_frame_payload(decode_message(bytes, limits.max_message_payload_bytes), limits);
+}
+
+void wcls::ipc::validate_reco_arrays(RecoArrays const& arrays, int const apa)
+{
+  auto const names = reco_array_names(apa);
+  if (arrays.arrays.size() != names.size()) {
+    throw ProtocolError("RecoArrays array count is not six");
+  }
+  for (std::size_t index = 0U; index < names.size(); ++index) {
+    auto const& array = arrays.arrays[index];
+    if (array.name != names[index]) {
+      throw ProtocolError("RecoArrays array name/order differs at " + names[index]);
+    }
+    auto const elements = checked_elements(array.rows,
+                                           array.columns,
+                                           std::numeric_limits<std::uint64_t>::max());
+    if (elements != array.values.size()) {
+      throw ProtocolError("RecoArrays shape/value count differs for " + array.name);
+    }
+    if (elements > std::numeric_limits<std::uint64_t>::max() / sizeof(float)) {
+      throw ProtocolError("RecoArrays byte count overflows for " + array.name);
+    }
+  }
+}
+
+std::vector<std::uint8_t> wcls::ipc::encode_reco_arrays(
+  EventRecoIdentity const identity,
+  int const apa,
+  RecoArrays const& arrays)
+{
+  validate_reco_arrays(arrays, apa);
+  Writer writer;
+  writer.u32(kRecoArraysSchemaVersion);
+  writer.u16(static_cast<std::uint16_t>(apa));
+  writer.u16(0U);
+  writer.u32(static_cast<std::uint32_t>(arrays.arrays.size()));
+  for (auto const& array : arrays.arrays) {
+    writer.string(array.name);
+    writer.u32(2U);
+    writer.u64(array.rows);
+    writer.u64(array.columns);
+    writer.u16(reco_float32_le);
+    writer.u16(0U);
+    writer.u64(static_cast<std::uint64_t>(array.values.size()) * sizeof(float));
+    for (auto const value : array.values) {
+      writer.f32(value);
+    }
+  }
+  MessageEnvelope envelope;
+  envelope.message_type = reco_message_type(apa);
+  envelope.identity = identity;
+  return encode_message(envelope, writer.take());
+}
+
+wcls::RecoArrays wcls::ipc::decode_reco_arrays(
+  Message const& message,
+  int const expected_apa,
+  RecoArraysDecodeLimits const& limits)
+{
+  validate_apa(expected_apa);
+  if (message.envelope.message_type != reco_message_type(expected_apa)) {
+    throw ProtocolError("wrong IPC message type for RecoArrays APA");
+  }
+  if (message.payload.size() != message.envelope.payload_bytes ||
+      message.payload.size() > limits.max_message_payload_bytes) {
+    throw ProtocolError("RecoArrays message length is invalid");
+  }
+
+  Reader reader{message.payload.data(), message.payload.size()};
+  auto const schema = reader.u32("RecoArrays schema");
+  if (schema != kRecoArraysSchemaVersion) {
+    throw ProtocolError("unsupported RecoArrays schema version");
+  }
+  auto const apa = reader.u16("RecoArrays APA");
+  if (apa != static_cast<std::uint16_t>(expected_apa)) {
+    throw ProtocolError("RecoArrays APA disagrees with message type");
+  }
+  if (reader.u16("RecoArrays reserved field") != 0U) {
+    throw ProtocolError("RecoArrays reserved field is nonzero");
+  }
+  auto const array_count = reader.count(limits.max_arrays, 36U, "RecoArrays array count");
+  auto const names = reco_array_names(expected_apa);
+  if (array_count != names.size()) {
+    throw ProtocolError("RecoArrays array count is not six");
+  }
+
+  RecoArrays result;
+  result.arrays.reserve(array_count);
+  std::uint64_t total_elements = 0U;
+  for (std::uint32_t index = 0U; index < array_count; ++index) {
+    RecoArray array;
+    array.name = reader.string(limits.max_name_bytes, "RecoArrays array name");
+    if (array.name != names[index]) {
+      throw ProtocolError("RecoArrays array name/order differs at " + names[index]);
+    }
+    auto const rank = reader.u32("RecoArrays rank");
+    if (rank > limits.max_rank || rank != 2U) {
+      throw ProtocolError("RecoArrays rank is not two");
+    }
+    auto const rows = reader.u64("RecoArrays row dimension");
+    auto const columns = reader.u64("RecoArrays column dimension");
+    if (rows > limits.max_dimension || columns > limits.max_dimension) {
+      throw ProtocolError("RecoArrays dimension exceeds decoder limit");
+    }
+    auto const elements = checked_elements(rows, columns, limits.max_array_elements);
+    if (elements > limits.max_total_elements - total_elements) {
+      throw ProtocolError("total RecoArrays elements exceed decoder limit");
+    }
+    total_elements += elements;
+    auto const dtype = reader.u16("RecoArrays dtype");
+    if (dtype != reco_float32_le) {
+      throw ProtocolError("RecoArrays dtype is not little-endian float32");
+    }
+    if (reader.u16("RecoArrays array reserved field") != 0U) {
+      throw ProtocolError("RecoArrays array reserved field is nonzero");
+    }
+    auto const byte_count = reader.u64("RecoArrays raw byte count");
+    auto const expected_bytes = elements * sizeof(float);
+    if (byte_count != expected_bytes) {
+      throw ProtocolError("RecoArrays raw byte count disagrees with shape");
+    }
+    if (byte_count > limits.max_array_bytes || byte_count > reader.remaining()) {
+      throw ProtocolError("RecoArrays raw bytes exceed decoder limit or remaining payload");
+    }
+    if (rows > std::numeric_limits<std::size_t>::max() ||
+        columns > std::numeric_limits<std::size_t>::max() ||
+        elements > std::numeric_limits<std::size_t>::max()) {
+      throw ProtocolError("RecoArrays shape exceeds this platform");
+    }
+    array.rows = static_cast<std::size_t>(rows);
+    array.columns = static_cast<std::size_t>(columns);
+    array.values.reserve(static_cast<std::size_t>(elements));
+    for (std::uint64_t value_index = 0U; value_index < elements; ++value_index) {
+      array.values.push_back(reader.f32("RecoArrays float32 data"));
+    }
+    result.arrays.push_back(std::move(array));
+  }
+  reader.require_end("RecoArrays payload");
+  validate_reco_arrays(result, expected_apa);
+  return result;
+}
+
+wcls::RecoArrays wcls::ipc::decode_reco_arrays(
+  std::vector<std::uint8_t> const& bytes,
+  int const expected_apa,
+  RecoArraysDecodeLimits const& limits)
+{
+  return decode_reco_arrays(decode_message(bytes, limits.max_message_payload_bytes),
+                            expected_apa,
+                            limits);
+}
+
+std::string wcls::ipc::fingerprint_reco_array(RecoArray const& array)
+{
+  auto const elements = checked_elements(array.rows,
+                                         array.columns,
+                                         std::numeric_limits<std::uint64_t>::max());
+  if (elements != array.values.size()) {
+    throw ProtocolError("cannot fingerprint RecoArray with invalid shape");
+  }
+  Fingerprint fingerprint;
+  fingerprint.string(array.name);
+  fingerprint.u32(2U);
+  fingerprint.u64(array.rows);
+  fingerprint.u64(array.columns);
+  fingerprint.u16(reco_float32_le);
+  fingerprint.u64(static_cast<std::uint64_t>(array.values.size()) * sizeof(float));
+  for (auto const value : array.values) {
+    fingerprint.f32(value);
+  }
+  return fingerprint.str();
 }
 
 void wcls::ipc::write_all(int const fd, std::uint8_t const* data, std::size_t size)
