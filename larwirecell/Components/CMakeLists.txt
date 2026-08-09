@@ -15,6 +15,9 @@ cet_make_library(LIBRARY_NAME WireCellLarsoft
   MultiChannelNoiseDB.cxx
   OpFlashSource.cxx
   RawFrameSource.cxx
+  RecoFrameBuilder.cxx
+  RecoFrameExtractor.cxx
+  RecoFramePayload.cxx
   SimDepoSetSource.cxx
   SimDepoSource.cxx
   # vvv obsolete vvv
@@ -48,3 +51,5 @@ cet_make_library(LIBRARY_NAME WireCellLarsoft
   WireCell::Gen
   ROOT::Core
 )
+
+add_subdirectory(test)

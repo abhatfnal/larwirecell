@@ -1,0 +1,19 @@
+process_name: RECOFRAMEEQUIVALENCE
+
+source: {
+  module_type: RootInput
+  maxEvents: 1
+}
+
+physics: {
+  producers: {
+    recoframeEquivalence: {
+      module_type: RecoFramePayloadEquivalence
+      expected_run: 1
+      expected_subrun: 2236
+      expected_event: 1
+    }
+  }
+  equivalencePath: [recoframeEquivalence]
+  trigger_paths: [equivalencePath]
+}
