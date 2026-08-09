@@ -19,6 +19,7 @@ cet_make_library(LIBRARY_NAME WireCellLarsoft
   RecoFrameExtractor.cxx
   RecoFrameIpcTestSupport.cxx
   RecoFramePayload.cxx
+  RecoFrameProcessBComponents.cxx
   RecoFrameProtocol.cxx
   SimDepoSetSource.cxx
   SimDepoSource.cxx
@@ -54,9 +55,30 @@ cet_make_library(LIBRARY_NAME WireCellLarsoft
   ROOT::Core
 )
 
+# WireCell's installed custard_boost.hpp includes miniz.h, but the v0.30.6
+# product installs that private header only in its source payload.  It is needed
+# solely by the Process-B executable's test-only historical-NPZ boundary reader.
+file(GLOB _wirecell_miniz_headers
+  "${WireCell_INCLUDE_DIR}/../../source/*/util/src/miniz.h")
+if(NOT _wirecell_miniz_headers)
+  message(FATAL_ERROR "WireCell miniz.h is required for the Process-B boundary test")
+endif()
+list(GET _wirecell_miniz_headers 0 _wirecell_miniz_header)
+get_filename_component(_wirecell_miniz_include "${_wirecell_miniz_header}" DIRECTORY)
+
 cet_make_exec(NAME reco_frame_ipc_worker
   SOURCE RecoFrameIpcWorker.cxx
   LIBRARIES larwirecell::WireCellLarsoft
 )
+
+cet_make_exec(NAME reco_frame_process_b_worker
+  SOURCE RecoFrameProcessBWorker.cxx RecoFrameProcessB.cxx RecoArrays.cxx MemoryMultiAlgBlobClustering.cxx
+  LIBRARIES
+  larwirecell::WireCellLarsoft
+  WireCell::Apps
+  WireCell::Aux
+  WireCell::Clus
+)
+target_include_directories(reco_frame_process_b_worker PRIVATE "${_wirecell_miniz_include}")
 
 add_subdirectory(test)

@@ -21,3 +21,13 @@ cet_test(reco_frame_ipc_worker_failure_test
   larwirecell::WireCellLarsoft
 )
 add_dependencies(reco_frame_ipc_worker_failure_test reco_frame_ipc_worker)
+
+cet_test(reco_frame_process_b_writer_policy_test
+  SOURCE RecoFrameProcessBWriterPolicy_test.cxx
+  TEST_ARGS
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../wctcfg/reco-frame-process-b.jsonnet
+  ${CMAKE_CURRENT_SOURCE_DIR}/../RecoFrameProcessBWorker.cxx
+  ${CMAKE_CURRENT_SOURCE_DIR}/../MemoryMultiAlgBlobClustering.cxx
+  ${CMAKE_CURRENT_SOURCE_DIR}/../RecoFrameProcessBComponents.cxx
+  ${CMAKE_CURRENT_SOURCE_DIR}/../CMakeLists.txt
+)
