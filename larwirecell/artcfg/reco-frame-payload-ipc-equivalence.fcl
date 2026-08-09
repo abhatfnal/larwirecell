@@ -1,0 +1,21 @@
+process_name: RECOFRAMEIPCEQUIVALENCE
+
+source: {
+  module_type: RootInput
+  maxEvents: 1
+}
+
+physics: {
+  producers: {
+    recoframeIpcEquivalence: {
+      module_type: RecoFramePayloadIpcEquivalence
+      expected_run: 1
+      expected_subrun: 2236
+      expected_event: 1
+      worker_path: "/lus/eagle/projects/neutrinoGPU/abhat/sbnd/sample_generation_port/work/larwirecell-streaming-recoframe-install/bin/reco_frame_ipc_worker"
+      custom_wct_root: "/lus/eagle/projects/neutrinoGPU/abhat/sbnd/sample_generation_port/reference/extracted/local_wct/wire-cell-toolkit"
+    }
+  }
+  equivalencePath: [recoframeIpcEquivalence]
+  trigger_paths: [equivalencePath]
+}

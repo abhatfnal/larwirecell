@@ -17,7 +17,9 @@ cet_make_library(LIBRARY_NAME WireCellLarsoft
   RawFrameSource.cxx
   RecoFrameBuilder.cxx
   RecoFrameExtractor.cxx
+  RecoFrameIpcTestSupport.cxx
   RecoFramePayload.cxx
+  RecoFrameProtocol.cxx
   SimDepoSetSource.cxx
   SimDepoSource.cxx
   # vvv obsolete vvv
@@ -50,6 +52,11 @@ cet_make_library(LIBRARY_NAME WireCellLarsoft
   art::Framework_Principal
   WireCell::Gen
   ROOT::Core
+)
+
+cet_make_exec(NAME reco_frame_ipc_worker
+  SOURCE RecoFrameIpcWorker.cxx
+  LIBRARIES larwirecell::WireCellLarsoft
 )
 
 add_subdirectory(test)

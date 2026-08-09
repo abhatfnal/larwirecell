@@ -20,6 +20,16 @@ cet_build_plugin(RecoFramePayloadEquivalence art::EDProducer
   WireCell::Util
 )
 
+cet_build_plugin(RecoFramePayloadIpcEquivalence art::EDProducer
+  LIBRARIES PRIVATE
+  larwirecell::WireCellLarsoft
+  art::Framework_Core
+  art::Framework_Principal
+  cetlib_except::cetlib_except
+  WireCell::Iface
+  WireCell::Util
+)
+
 cet_build_plugin(WireCellToolkit art::SharedProducer
   LIBRARIES PRIVATE
   art::Utilities
