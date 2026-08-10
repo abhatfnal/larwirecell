@@ -38,3 +38,11 @@ cet_test(reco_frame_process_b_writer_policy_test
   ${CMAKE_CURRENT_SOURCE_DIR}/../CMakeLists.txt
   ${CMAKE_CURRENT_SOURCE_DIR}/../process_c_python311_launcher.sh
 )
+
+cet_test(reco_frame_process_b_parent_mode_protocol_test
+  SOURCE RecoFrameProcessBParentModeProtocol_test.cxx
+  TEST_ARGS $<TARGET_FILE:reco_frame_process_b_worker>
+  LIBRARIES
+  larwirecell::WireCellLarsoft
+)
+add_dependencies(reco_frame_process_b_parent_mode_protocol_test reco_frame_process_b_worker)

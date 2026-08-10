@@ -47,19 +47,68 @@ namespace {
       std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin).count());
   }
 
-  int parse_fd(int const argc, char const* const* const argv)
+  struct WorkerArgs {
+    int fd = -1;
+    bool parent_mode = false;
+  };
+
+  int parse_ipc_fd(char const* const value)
   {
-    if (argc != 3 || std::string{argv[1]} != "--ipc-fd") {
-      throw wcls::ipc::ProtocolError("usage: reco_frame_process_b_worker --ipc-fd N");
-    }
     errno = 0;
     char* end = nullptr;
-    auto const parsed = std::strtol(argv[2], &end, 10);
-    if (errno != 0 || end == argv[2] || *end != '\0' || parsed < 0 ||
+    auto const parsed = std::strtol(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed < 0 ||
         parsed > std::numeric_limits<int>::max()) {
       throw wcls::ipc::ProtocolError("invalid --ipc-fd value");
     }
     return static_cast<int>(parsed);
+  }
+
+  [[noreturn]] void throw_usage()
+  {
+    throw wcls::ipc::ProtocolError(
+      "usage: reco_frame_process_b_worker --ipc-fd N [--output-mode test-python|parent]");
+  }
+
+  WorkerArgs parse_args(int const argc, char const* const* const argv)
+  {
+    if (argc != 3 && argc != 5) {
+      throw_usage();
+    }
+    int fd = -1;
+    bool has_fd = false;
+    bool has_mode = false;
+    bool parent_mode = false;
+    for (int i = 1; i + 1 < argc; i += 2) {
+      std::string const key{argv[i]};
+      std::string const value{argv[i + 1]};
+      if (key == "--ipc-fd") {
+        if (has_fd) {
+          throw_usage();
+        }
+        fd = parse_ipc_fd(value.c_str());
+        has_fd = true;
+      } else if (key == "--output-mode") {
+        if (has_mode) {
+          throw_usage();
+        }
+        if (value == "parent") {
+          parent_mode = true;
+        } else if (value == "test-python") {
+          parent_mode = false;
+        } else {
+          throw wcls::ipc::ProtocolError(
+            "usage: reco_frame_process_b_worker --ipc-fd N [--output-mode test-python|parent]");
+        }
+        has_mode = true;
+      } else {
+        throw_usage();
+      }
+    }
+    if (!has_fd) {
+      throw_usage();
+    }
+    return {fd, parent_mode};
   }
 
   std::filesystem::path executable_path()
@@ -448,6 +497,31 @@ namespace {
               << " round_trip_ms=" << milliseconds(round_trip_ns) << '\n';
   }
 
+  void run_parent_return(wcls::ProcessBResult const& result, int const fd)
+  {
+    std::array<std::vector<std::uint8_t>, 2U> encoded;
+    for (std::size_t apa = 0U; apa < encoded.size(); ++apa) {
+      encoded[apa] = wcls::ipc::encode_reco_arrays(result.identity,
+                                                    static_cast<int>(apa),
+                                                    result.apa[apa].reco_arrays);
+      std::cout << "PROCESS_B_RECOARRAYS_WIRE apa=" << apa
+                << " wire_bytes=" << encoded[apa].size()
+                << " fingerprint=" << wcls::ipc::test::fingerprint_bytes(encoded[apa]) << '\n';
+    }
+    wcls::ipc::write_all(fd, encoded[0]);
+    wcls::ipc::write_all(fd, encoded[1]);
+    wcls::ipc::MessageEnvelope eos;
+    eos.message_type = wcls::ipc::MessageType::EndOfStream;
+    eos.identity = result.identity;
+    wcls::ipc::write_all(fd, wcls::ipc::encode_message(eos, {}));
+    auto const ack = wcls::ipc::read_message(fd, 4096U);
+    if (ack.envelope.message_type != wcls::ipc::MessageType::Ack || !ack.payload.empty()) {
+      throw std::runtime_error("parent Ack message is invalid");
+    }
+    require_identity(ack, result.identity, "parent Ack");
+    std::cout << "PROCESS_B_PARENT_RETURN PASS apa0=true apa1=true ack=true\n";
+  }
+
   void report_arrays(wcls::ProcessBResult const& result, bool const compared)
   {
     for (std::size_t apa = 0U; apa < result.apa.size(); ++apa) {
@@ -488,7 +562,8 @@ int main(int const argc, char const* const* const argv)
   wcls::EventRecoIdentity identity;
   std::string legacy_directory;
   try {
-    fd = parse_fd(argc, argv);
+    auto const args = parse_args(argc, argv);
+    fd = args.fd;
     wcls::install_process_b_runtime();
     auto const incoming =
       wcls::ipc::read_message(fd, wcls::ipc::DecodeLimits{}.max_message_payload_bytes);
@@ -513,12 +588,26 @@ int main(int const argc, char const* const* const argv)
     run_process_b_graph(config_path);
     auto const result = wcls::take_process_b_result();
     report_arrays(result, !legacy_directory.empty());
-    run_process_c(result);
+
+    if (args.parent_mode) {
+      run_parent_return(result, fd);
+    } else {
+      run_process_c(result);
+    }
 
     auto const libraries = wcls::ipc::test::loaded_wirecell_libraries();
     require_exact_clustering_runtime(libraries, custom_wct_root());
     for (auto const& library : libraries) {
       std::cout << "PROCESS_B_LIBRARY " << library << '\n';
+    }
+
+    if (args.parent_mode) {
+      std::cout << "PROCESS_B_OUTPUT_MODE mode=parent apa0=true apa1=true committed=true\n";
+      ::close(fd);
+      if (!legacy_directory.empty()) {
+        std::filesystem::remove_all(legacy_directory);
+      }
+      return 0;
     }
 
     wcls::ipc::test::WorkerReport report;
